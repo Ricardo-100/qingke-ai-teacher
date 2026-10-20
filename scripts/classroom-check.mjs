@@ -1,0 +1,98 @@
+// Browser integration uses deterministic local voice/recognition and model fixtures. No paid calls.
+import { chromium } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
+import { createServer } from '../server/index.mjs';
+import { startPlannedLesson } from './planner-fixture.mjs';
+const server = createServer(); let browser;
+try {
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.addInitScript(() => {
+    let utterance;
+    const synth = { cancel() {}, pause() {}, resume() {}, getVoices: () => [{ voiceURI: 'test', lang: 'zh-CN', name: 'fixture' }], addEventListener() {}, speak(u) { utterance = u; queueMicrotask(() => u.onstart?.()); } };
+    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true });
+    window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
+    window.__finishSpeech = () => utterance?.onend?.();
+    window.__oldSpeech = () => utterance;
+    window.SpeechRecognition = class { start() { window.__recognition = this; } abort() {} stop() {} };
+  });
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.locator('#home-demo').click();
+  await page.locator('.board-entry').waitFor();
+  assert.equal(await page.locator('.board-entry').count(), 1);
+  await page.evaluate(() => { window.__late = window.__oldSpeech(); });
+  await page.locator('#question').fill('能换个例子吗？');
+  assert.match(await page.locator('#state-label').innerText(), /老师正在讲解/, 'typing must not interrupt teaching');
+  await page.locator('#question').press('Enter');
+  await page.locator('.answer-entry').waitFor();
+  assert.equal(await page.locator('.board-entry').count(), 2);
+  await page.evaluate(() => { window.__late.onend?.(); window.__late.onstart?.(); });
+  assert.equal(await page.locator('.board-entry').count(), 2, 'late speech callbacks must not write or advance');
+  await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelector('#state-label').textContent.includes('问题讲完'));
+  await page.locator('#resume').click();
+  assert.equal(await page.locator('.board-entry').count(), 2, 'resuming must not duplicate the interrupted beat');
+  await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelectorAll('.board-entry').length === 3);
+  // Actual recognition callback interrupts on interim speech, before final transcription.
+  await page.locator('#mic').click();
+  await page.evaluate(() => window.__recognition.onspeechstart());
+  assert.match(await page.locator('#state-label').innerText(), /我在听/);
+  await page.evaluate(() => window.__recognition.onresult({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: '概率是什么意思' } }] }));
+  assert.match(await page.locator('#state-label').innerText(), /我在听/);
+  await page.evaluate(() => window.__recognition.onresult({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: '概率是什么意思？' } }] }));
+  await page.waitForFunction(() => document.querySelectorAll('.answer-entry').length === 2);
+  await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelector('#state-label').textContent.includes('问题讲完'));
+  await page.locator('#mic').click();
+  await page.locator('#resume').click();
+  await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelectorAll('.board-entry').length === 5);
+  for (let i = 0; i < 5; i++) { await page.evaluate(() => window.__finishSpeech()); await page.waitForTimeout(20); }
+  await page.waitForFunction(() => document.querySelector('#state-label').textContent.includes('讲解完成'));
+  assert.ok(await page.locator('#board-content table').count() >= 2);
+  assert.ok(await page.locator('.formula').count() >= 2);
+  const preserved = await page.locator('.board-entry').count();
+  await page.locator('#zoom-in').click(); assert.equal(await page.locator('#zoom-reset').innerText(), '110%');
+  await page.locator('#zoom-reset').click();
+  await page.locator('#chat-close').click(); assert.equal(await page.locator('.conversation').isVisible(), false);
+  await page.locator('#reopen-chat').click(); assert.equal(await page.locator('.conversation').isVisible(), true);
+  await mkdir('docs', { recursive: true });
+  await page.locator('#board-viewport').evaluate(el => { el.style.scrollBehavior = 'auto'; el.scrollTop = 0; });
+  await page.waitForTimeout(800);
+  await page.screenshot({ path: 'docs/classroom-desktop.png' });
+  await page.reload();
+  await page.locator('.board-entry').first().waitFor();
+  assert.equal(await page.locator('.board-entry').count(), preserved);
+  assert.match(await page.locator('#state-label').innerText(), /已暂停/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#chat-close').click();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: 'docs/classroom-mobile.png' });
+  // Live generation stream: answer can play before all beats arrive and interrupted data is ignored.
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route('**/api/config', route => route.fulfill({ json: { configured: true, model: 'fixture', baseUrl: 'http://127.0.0.1' } }));
+  const requests = [];
+  await page.route('**/api/classroom', async route => {
+    const body = route.request().postDataJSON(); requests.push(body);
+    const speech = body.question ? '这是实时问题的回答。' : '这是实时课程的讲解。';
+    const beats = [{ speech, blocks: [{ type: 'heading', text: body.question ? '补充回答' : '实时课程' }] }, { speech: '继续分析第二步。', blocks: [{ type: 'text', text: '第二步重点' }] }];
+    await route.fulfill({ contentType: 'application/x-ndjson', body: beats.map(beat => JSON.stringify({ type: 'beat', beat })).join('\n') + '\n' + JSON.stringify({ type: 'done' }) + '\n' });
+  });
+  await page.reload();
+  await startPlannedLesson(page, '导数是什么');
+  await page.waitForFunction(() => document.querySelector('#board-content').textContent.includes('实时课程'));
+  await page.locator('#question').fill('第一步为什么'); await page.locator('#question').press('Enter');
+  await page.waitForFunction(() => document.querySelector('#board-content').textContent.includes('补充回答'));
+  assert.equal(requests.at(-1).coursePosition, 0); assert.ok(requests.at(-1).board.length);
+  await page.evaluate(() => window.__finishSpeech()); await page.waitForTimeout(20);
+  await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelector('#state-label').textContent.includes('问题讲完'));
+  await page.locator('#resume').click(); await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelectorAll('.board-entry').length === 4);
+  assert.deepEqual(errors, []);
+  console.log('Classroom checks passed: interruption, stale callbacks, microphone, resume, board persistence, AI stream, zoom, desktop/mobile.');
+} finally { await browser?.close(); await new Promise(r => server.close(r)); }

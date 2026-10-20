@@ -1,0 +1,92 @@
+// Local browser fixtures exercise planning, disk persistence and multi-batch teaching.
+import { chromium } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, readdir, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createServer } from '../server/index.mjs';
+
+const dir = await mkdtemp(join(tmpdir(), 'qingke-plan-ui-'));
+const server = createServer({ plansDirectory: dir, envFile: join(dir, '.env') });
+server.prependListener('request', req => { if (req.headers.origin) req.headers.origin = 'http://127.0.0.1:5173'; });
+let browser;
+const outline = { title: '从零开始学 Python', goal: '掌握基础并完成实际练习', lessons: [{ title: '变量与表达式', objectives: '理解变量、赋值及计算', sections: ['从生活例子理解变量', '赋值与表达式逐步演示', '常见错误与独立练习', '总结及自测'] }, { title: '条件判断', objectives: '用分支解决实际问题', sections: ['复习变量', '布尔表达式', '分支实例与练习', '自测与总结'] }] };
+try {
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.addInitScript(() => {
+    let utterance;
+    Object.defineProperty(window, 'speechSynthesis', { value: { cancel() {}, pause() {}, resume() {}, getVoices: () => [{ voiceURI: 'fixture', lang: 'zh-CN', name: 'fixture' }], addEventListener() {}, speak(u) { utterance = u; queueMicrotask(() => u.onstart?.()); } }, configurable: true });
+    window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
+    window.__finishSpeech = () => utterance?.onend?.();
+  });
+  await page.route('**/api/config', route => route.fulfill({ json: { configured: true, model: 'fixture', baseUrl: 'http://127.0.0.1' } }));
+  await page.route('**/api/tts/config', route => route.fulfill({ json: { configured: false } }));
+  let discussions = 0;
+  await page.route('**/api/course-plans/discuss', route => {
+    const body = route.request().postDataJSON(); discussions++;
+    assert.equal(body.lessonCount, 2); assert.equal(body.minutesPerLesson, 30);
+    if (discussions === 2) assert.equal(body.messages.length, 3);
+    return route.fulfill({ json: { reply: discussions === 1 ? '先从变量开始，之后学习条件判断。可以继续调整。' : '已增加独立练习。', outline, lessonCount: 2, minutesPerLesson: 30 } });
+  });
+  let batches = 0;
+  await page.route('**/api/classroom', route => {
+    const body = route.request().postDataJSON(); batches++;
+    assert.equal(body.lessonPlan.minutes, 30); assert.equal(body.lessonPlan.lesson.title, outline.lessons[0].title);
+    if (batches === 2) assert.ok(body.lessonPlan.generatedCharacters > 0);
+    const events = [{ type: 'beat', beat: { speech: batches === 1 ? '我们先来理解变量。' : '再来练习赋值。', blocks: [{ type: 'text', text: `第 ${batches} 批板书` }] } }, { type: 'done', lessonComplete: batches >= 2 }];
+    return route.fulfill({ contentType: 'application/x-ndjson', body: events.map(e => JSON.stringify(e)).join('\n') + '\n' });
+  });
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  assert.equal(await page.locator('#home-page').isVisible(), true);
+  assert.equal(await page.locator('.classroom').isVisible(), false);
+  await page.keyboard.press('Space'); assert.equal(batches, 0, 'homepage keyboard shortcuts must not start teaching');
+  await page.locator('#home-plan').click(); await page.locator('#plan-message').fill('零基础学 Python');
+  await page.locator('#plan-count').fill('2'); await page.locator('#plan-discuss').click();
+  await page.locator('#plan-preview h3').waitFor();
+  await page.locator('#plan-message').fill('多增加一些练习'); await page.locator('#plan-discuss').click();
+  await page.waitForFunction(() => document.querySelector('#plan-discussion').textContent.includes('已增加独立练习'));
+  await page.locator('#plan-save').click(); await page.locator('.saved-plan').waitFor();
+  assert.equal((await readdir(dir)).filter(f => f.endsWith('.json')).length, 1);
+  await page.locator('#plan-minutes').fill('45'); assert.equal(await page.locator('#plan-save').isDisabled(), true);
+  await page.locator('[data-edit]').click(); assert.equal(await page.locator('#plan-minutes').inputValue(), '30');
+  await mkdir('docs', { recursive: true });
+  await page.locator('#home-page').evaluate(el => { el.style.scrollBehavior = 'auto'; el.scrollTop = 0; });
+  await page.screenshot({ path: 'docs/home-desktop.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.locator('#planner-dialog').evaluate(el => el.scrollWidth <= el.clientWidth), true);
+  assert.equal(await page.locator('#home-page').evaluate(el => el.scrollWidth <= el.clientWidth), true);
+  await page.screenshot({ path: 'docs/home-mobile.png' });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.reload(); await page.locator('.saved-plan').waitFor();
+  await page.locator('[data-lesson="0"]').click();
+  assert.equal(batches, 0, 'loading a plan must not start a paid teaching request');
+  await page.locator('#play').click(); await page.locator('.board-entry').waitFor();
+  await page.evaluate(() => window.__finishSpeech());
+  await page.waitForFunction(() => document.querySelectorAll('.board-entry').length === 2);
+  assert.equal(batches, 2, 'a planned lesson must continue beyond the first short batch');
+  await page.evaluate(() => window.__finishSpeech()); await page.locator('#next-lesson').waitFor();
+  await page.locator('#next-lesson').click(); assert.match(await page.locator('#topic-name').innerText(), /第 2 节/);
+  await page.locator('#topic-open').click(); await page.locator('[data-lesson="0"]').click();
+  assert.equal(await page.locator('.board-entry').count(), 2, 'returning to an earlier lesson restores its board');
+  await page.reload(); assert.equal(await page.locator('.board-entry').count(), 2);
+  assert.equal(batches, 2, 'refresh must remain paused');
+  await page.locator('#play').click();
+  await page.locator('#new-course').click();
+  assert.equal(await page.locator('#home-page').isVisible(), true);
+  assert.equal(await page.locator('#home-continue').isVisible(), true);
+  assert.equal(await page.locator('.classroom').isVisible(), false);
+  await page.reload();
+  assert.equal(await page.locator('#home-page').isVisible(), true, 'refreshing the homepage stays on the homepage');
+  await page.locator('#home-resume').click();
+  assert.equal(await page.locator('.board-entry').count(), 2);
+  assert.match(await page.locator('#state-label').innerText(), /已暂停/);
+  await page.goBack(); assert.equal(await page.locator('#home-page').isVisible(), true);
+  await page.goForward(); assert.equal(await page.locator('.classroom').isVisible(), true);
+  assert.deepEqual(errors, []);
+  console.log('Home/planner checks passed: landing page, discussion, disk library, reload, batches, next lesson, return home, resume, navigation, mobile layout.');
+} finally {
+  await browser?.close(); server.closeAllConnections(); await new Promise(r => server.close(r)); await rm(dir, { recursive: true, force: true });
+}

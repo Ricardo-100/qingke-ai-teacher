@@ -1,0 +1,35 @@
+node_modules/
+.npm-cache/
+dist/
+.env
+.env.*
+!.env.example
+data/
+.research/
+test-results/
+playwright-report/
+*.log
+public/pdfjs/
+
+# Private local settings, credentials and generated files
+.vscode/
+.idea/
+.agents/
+.codex/
+.DS_Store
+Thumbs.db
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite*
+*.db
+*.bak
+*.tmp
+
+# Only publish reviewed, anonymous demo images
+docs/*.png
+!docs/home-desktop.png
+!docs/classroom-desktop.png
+docs/*-live.json
+docs/classroom-latency.md
