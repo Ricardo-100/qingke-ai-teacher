@@ -8,6 +8,7 @@
 
 ![Node.js](https://img.shields.io/badge/Node.js-22.19%2B-315c4b?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-7b70a5?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/License-MIT-315c4b?style=flat-square)](LICENSE)
 ![版本](https://img.shields.io/badge/version-0.1.0-527862?style=flat-square)
 
 [快速开始](#快速开始) · [连接模型](#连接模型) · [数据与隐私](#数据与隐私)
@@ -116,7 +117,11 @@ node scripts/course-planner-check.mjs
 | `scripts/`、`tests/` | 开发工具、自动测试与匿名测试夹具 |
 | `docs/` | 演示界面预览 |
 
-技术栈：TypeScript、Vite、Konva、Lucide、PDF.js、Rough.js、perfect-freehand。第三方来源及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。当前尚未为原创代码指定开源许可证。
+技术栈：TypeScript、Vite、Konva、Lucide、PDF.js、Rough.js、perfect-freehand。第三方来源及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 许可证
+
+本项目原创代码采用 [MIT License](LICENSE)，允许使用、修改、分发及商用，使用或分发时须保留版权和许可声明。软件按现状提供，不附带担保。第三方代码及依赖继续遵循各自许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 当前边界
 
